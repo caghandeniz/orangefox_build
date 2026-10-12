@@ -52,11 +52,34 @@ jobs:
           cd "$HOME/OrangeFox_sync"
           git clone --depth=1 https://gitlab.com/OrangeFox/sync.git
 
+      - name: Patch sync script for shallow clones
+        run: |
+          cd "$HOME/OrangeFox_sync/sync"
+          echo "== repo sync satirlari (once):"
+          grep -n "repo sync" orangefox_sync.sh || true
+          echo "== git clone satirlari (once):"
+          grep -n "git clone" orangefox_sync.sh || true
+          # repo sync: shallow, bundle yok, tag yok, 4 paralel
+          sed -i -E 's/repo sync/repo sync -c --no-clone-bundle --no-tags -j4/g' orangefox_sync.sh
+          # git clone: sadece son commit
+          sed -i -E 's/git clone( -q)? /git clone --depth=1\1 /g' orangefox_sync.sh
+          echo "== Yamadan sonra repo sync:"
+          grep -n "repo sync" orangefox_sync.sh || true
+          echo "== Yamadan sonra git clone:"
+          grep -n "git clone" orangefox_sync.sh || true
+
       - name: Sync OrangeFox 12.1
         timeout-minutes: 150
         run: |
+          # Her 2 dakikada disk durumunu yaz
+          (while true; do echo "[disk] $(df -BG / | tail -1)"; sleep 120; done) &
+          WATCH_PID=$!
           cd "$HOME/OrangeFox_sync/sync"
           ./orangefox_sync.sh --branch 12.1 --path "$HOME/fox_12.1"
+          RC=$?
+          kill $WATCH_PID 2>/dev/null || true
+          df -BG / | tail -1
+          exit $RC
 
       - name: Clone B2_Ultra device tree
         run: |
@@ -66,4 +89,38 @@ jobs:
           if [ -f device/ant/B2_Ultra/twrp_B2_Ultra.mk ]; then
             mv device/ant/B2_Ultra/twrp_B2_Ultra.mk device/ant/B2_Ultra/fox_B2_Ultra.mk
             sed -i 's/PRODUCT_NAME := twrp_B2_Ultra/PRODUCT_NAME := fox_B2_Ultra/' device/ant/B2_Ultra/fox_B2_Ultra.mk
-            sed -i 's/twrp_B2_Ultra/fox_B2_Ultra/g'
+            sed -i 's/twrp_B2_Ultra/fox_B2_Ultra/g' device/ant/B2_Ultra/AndroidProducts.mk device/ant/B2_Ultra/vendorsetup.sh
+          fi
+          grep -n "PIXEL_FORMAT\|PLATFORM_VERSION" device/ant/B2_Ultra/BoardConfig.mk
+          ls device/ant/B2_Ultra/*.mk
+
+      - name: Build OrangeFox recovery ramdisk
+        timeout-minutes: 150
+        run: |
+          cd "$HOME/fox_12.1"
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export FOX_BUILD_DEVICE=B2_Ultra
+          export LC_ALL=C
+          source build/envsetup.sh
+          lunch fox_B2_Ultra-eng
+          mka vendorbootimage
+
+      - name: Merge with stock platform ramdisk
+        run: |
+          set -e
+          cd "$HOME"
+          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg mkbootimg
+          OFX_IMG="$HOME/fox_12.1/out/target/product/B2_Ultra/vendor_boot.img"
+          [ -f "$OFX_IMG" ] || { echo "HATA: vendor_boot.img yok"; exit 1; }
+
+          rm -rf "$HOME/mrg" && mkdir -p "$HOME/mrg/unp"
+          python3 mkbootimg/unpack_bootimg.py --boot_img "$OFX_IMG" --out "$HOME/mrg/unp" > "$HOME/mrg/hdr.txt"
+          cat "$HOME/mrg/hdr.txt"
+
+          REC="$HOME/mrg/unp/vendor_ramdisk01"
+          [ -f "$REC" ] || { echo "HATA: recovery ramdisk entry'si yok"; exit 1; }
+          case "$(file -b "$REC")" in
+            *gzip*) zcat "$REC" | lz4 -l -9 -f - "$HOME/mrg/rec.lz4" ;;
+            *LZ4*|*lz4*) cp "$REC" "$HOME/mrg/rec.lz4" ;;
+            *) echo "HATA: bilinmeyen sikistirma: $(file -b "$REC")"; exit 1 ;;
+          esac
