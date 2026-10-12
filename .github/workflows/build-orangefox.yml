@@ -1,63 +1,69 @@
-name: Build OrangeFox
+name: Build OrangeFox B2_Ultra
 
 on:
   workflow_dispatch:
+    inputs:
+      device_branch:
+        description: "Cihaz agaci branch"
+        required: true
+        default: "main"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 340
     steps:
-      - name: Free up disk space
+      - name: Checkout repo (stock files)
+        uses: actions/checkout@v4
+
+      - name: Maximize build disk space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 512
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Disk and resources
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo apt-get clean
-          df -h
-          nproc --all
+          df -BG / | tail -1
           free -h
+          nproc --all
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y repo git-core gnupg flex bison build-essential zip unzip curl \
             zlib1g-dev libc6-dev-i386 lib32ncurses-dev x11proto-core-dev libx11-dev lib32z1-dev \
-            libgl1-mesa-dev libxml2-utils xsltproc fontconfig libncurses5 bc rsync lz4 \
+            libgl1-mesa-dev libxml2-utils xsltproc fontconfig libncurses5 bc rsync lz4 cpio \
             python3 python3-pip openjdk-17-jdk
 
-      - name: Init OrangeFox source
+      - name: Git identity
         run: |
-          mkdir -p ~/ofox && cd ~/ofox
           git config --global user.email "caghandeniz2013cd@outlook.com"
           git config --global user.name "caghandeniz"
-          repo init --depth=1 --no-repo-verify -u https://gitlab.com/OrangeFox/Manifest.git -b fox-12.1
 
-      - name: Add local manifest
+      - name: Clone OrangeFox sync tools
         run: |
-          mkdir -p ~/ofox/.repo/local_manifests
-          cat > ~/ofox/.repo/local_manifests/local_manifest.xml << 'EOL'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <manifest>
-            <remote name="mygithub" fetch="https://github.com/" />
-            <project name="caghandeniz/orangefox_device_ant_B2_Ultra" path="device/ant/B2_Ultra" remote="mygithub" revision="main" />
-          </manifest>
-          EOL
+          mkdir -p "$HOME/OrangeFox_sync"
+          cd "$HOME/OrangeFox_sync"
+          git clone --depth=1 https://gitlab.com/OrangeFox/sync.git
 
-      - name: Repo sync
-        timeout-minutes: 120
+      - name: Sync OrangeFox 12.1
+        timeout-minutes: 150
         run: |
-          cd ~/ofox
-          repo sync -c -j$(nproc --all) --force-sync --no-tags --no-clone-bundle --fail-fast
+          cd "$HOME/OrangeFox_sync/sync"
+          ./orangefox_sync.sh --branch 12.1 --path "$HOME/fox_12.1"
 
-      - name: Build OrangeFox
+      - name: Clone B2_Ultra device tree
         run: |
-          cd ~/ofox
-          source build/envsetup.sh
-          lunch fox_B2_Ultra-eng
-          mka vendorbootimage
-
-      - name: Upload artifact
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: orangefox-B2_Ultra
-          path: ~/ofox/out/target/product/B2_Ultra/*.img
+          cd "$HOME/fox_12.1"
+          git clone --depth=1 -b "${{ inputs.device_branch }}" \
+            https://github.com/caghandeniz/twrp_device_ant_B2_Ultra.git device/ant/B2_Ultra
+          if [ -f device/ant/B2_Ultra/twrp_B2_Ultra.mk ]; then
+            mv device/ant/B2_Ultra/twrp_B2_Ultra.mk device/ant/B2_Ultra/fox_B2_Ultra.mk
+            sed -i 's/PRODUCT_NAME := twrp_B2_Ultra/PRODUCT_NAME := fox_B2_Ultra/' device/ant/B2_Ultra/fox_B2_Ultra.mk
+            sed -i 's/twrp_B2_Ultra/fox_B2_Ultra/g'
